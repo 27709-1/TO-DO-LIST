@@ -435,9 +435,26 @@ svg{display:block;flex-shrink:0}
   .stats{grid-template-columns:1fr 1fr}
   .hdr-count{display:none}
 }
+
+.auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--c-bg)}
+.auth-card{width:100%;max-width:420px;background:var(--c-surface);border:1px solid var(--c-border2);border-radius:var(--r-xl);padding:28px}
+.auth-card h1{margin-bottom:8px}.auth-card p{color:var(--c-text2);margin:10px 0 20px}
+.auth-card label{display:block;font-size:.82rem;color:var(--c-text2);margin:12px 0 5px}
+.auth-card input{width:100%;padding:12px;background:var(--c-surface2);border:1px solid var(--c-border2);border-radius:var(--r-md);color:var(--c-text)}
+.auth-card button{margin-top:14px}.auth-note{font-size:.82rem;min-height:20px;color:var(--c-text2)}
+.auth-user{font-size:.78rem;color:var(--c-text2);margin-right:10px}
+body.authenticated #authScreen{display:none}body:not(.authenticated) .app{display:none}
 </style>
 </head>
 <body>
+<div id="authScreen" class="auth-screen"><section class="auth-card">
+<h1 id="authTitle">Welcome to TaskFlow</h1><p id="authDesc">Sign in to access your tasks from any device.</p>
+<form id="authForm"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="email" required>
+<label for="authPassword">Password</label><input id="authPassword" type="password" minlength="6" autocomplete="current-password" required>
+<button class="btn btn-primary" id="authSubmit" type="submit">Sign in</button></form>
+<div class="auth-note" id="authNote" role="status"></div>
+<button class="btn btn-ghost" id="authToggle" type="button">Create an account</button>
+</section></div>
 <div class="app">
 
 <!-- ════════════════ HEADER ════════════════ -->
@@ -454,6 +471,7 @@ svg{display:block;flex-shrink:0}
     </div>
     <div class="hdr-right">
       <span class="hdr-count" id="hdrCount" aria-live="polite"></span>
+      <span class="auth-user" id="authUser"></span><button class="btn btn-ghost" id="btnLogout" type="button">Log out</button>
       <button class="btn btn-primary" id="btnAdd" aria-label="Add new task">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Add Task
@@ -626,6 +644,7 @@ svg{display:block;flex-shrink:0}
 <!-- ════════════════════════════════════════
      APPLICATION SCRIPT
 ════════════════════════════════════════ -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* jshint esversion:6 */
 (function(){
@@ -633,6 +652,9 @@ svg{display:block;flex-shrink:0}
 
 /* ── Storage ─────────────────────────────────────────────────────── */
 var STORE_KEY = 'taskflow_v2';
+var sb = window.supabase.createClient('https://ulzjvghzjplbsfgrzmqa.supabase.co','sb_publishable_59TVRiz6LptY174kWQ_-yQ_2f07mXhr');
+var currentUser = null;
+var authMode = 'login';
 
 function storageLoad(){
   try{
@@ -662,6 +684,35 @@ function storageSave(tasks){
 /* ── ID generator ────────────────────────────────────────────────── */
 function newId(){
   return 'tf-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+}
+
+
+async function cloudLoad(){
+ var r=await sb.from('tasks').select('*').eq('user_id',currentUser.id).order('created_at',{ascending:false});
+ if(r.error)throw r.error;
+ return (r.data||[]).map(function(x){return {id:x.id,title:x.title,description:x.description||'',dueDate:x.due_date,priority:x.priority,status:x.status,createdAt:x.created_at,updatedAt:x.updated_at};});
+}
+async function cloudInsert(t){
+ var r=await sb.from('tasks').insert({user_id:currentUser.id,title:t.title,description:t.description||'',due_date:t.dueDate||null,priority:t.priority,status:t.status}).select().single();
+ if(r.error)throw r.error;return {id:r.data.id,title:r.data.title,description:r.data.description||'',dueDate:r.data.due_date,priority:r.data.priority,status:r.data.status,createdAt:r.data.created_at,updatedAt:r.data.updated_at};
+}
+async function cloudUpdate(t){
+ var r=await sb.from('tasks').update({title:t.title,description:t.description||'',due_date:t.dueDate||null,priority:t.priority,status:t.status,updated_at:new Date().toISOString()}).eq('id',t.id).eq('user_id',currentUser.id);
+ if(r.error)throw r.error;
+}
+async function cloudDelete(id){var r=await sb.from('tasks').delete().eq('id',id).eq('user_id',currentUser.id);if(r.error)throw r.error;}
+async function syncSession(session){
+ currentUser=session&&session.user?session.user:null;
+ if(!currentUser){document.body.classList.remove('authenticated');tasks=[];render();return;}
+ document.body.classList.add('authenticated');document.getElementById('authUser').textContent=currentUser.email||'';
+ try{
+  var old=storageLoad(), marker='taskflow_imported_'+currentUser.id;
+  if(old.length&&!localStorage.getItem(marker)){
+   var rows=old.map(function(t){return {user_id:currentUser.id,title:t.title,description:t.description||'',due_date:t.dueDate||null,priority:['low','medium','high'].includes(t.priority)?t.priority:'medium',status:['pending','inprogress','completed'].includes(t.status)?t.status:'pending',created_at:t.createdAt||new Date().toISOString()};});
+   var m=await sb.from('tasks').insert(rows);if(m.error)throw m.error;localStorage.setItem(marker,'1');
+  }
+  tasks=await cloudLoad();render();
+ }catch(e){console.error(e);toast('Cloud sync failed: '+e.message,'err',7000);}
 }
 
 /* ── Date helpers ────────────────────────────────────────────────── */
@@ -949,7 +1000,7 @@ window.App = {
     setTimeout(function(){ document.getElementById('fTitle').focus(); }, 90);
   },
 
-  save: function(){
+  save: async function(){
     var title = document.getElementById('fTitle').value;
     if(!title || !title.trim()){
       showErr('Title is required.');
@@ -975,22 +1026,13 @@ window.App = {
     if(editId){
       var idx = tasks.findIndex(function(t){ return t.id===editId; });
       if(idx===-1){ toast('Task no longer exists.','err'); return; }
-      tasks[idx] = Object.assign({}, tasks[idx], data, {updatedAt: new Date().toISOString()});
-      storageSave(tasks);
-      closeOverlay('taskOverlay');
-      render();
-      toast('Task updated!','ok');
+      var updated=Object.assign({},tasks[idx],data,{updatedAt:new Date().toISOString()});
+      try{await cloudUpdate(updated);tasks[idx]=updated;closeOverlay('taskOverlay');render();toast('Task updated!','ok');}
+      catch(e){toast('Save failed: '+e.message,'err',6000);}
     } else {
-      var newTask = Object.assign({}, data, {
-        id:        newId(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      tasks.unshift(newTask);
-      storageSave(tasks);
-      closeOverlay('taskOverlay');
-      render();
-      toast('Task added!','ok');
+      var newTask=Object.assign({},data,{createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});
+      try{var saved=await cloudInsert(newTask);tasks.unshift(saved);closeOverlay('taskOverlay');render();toast('Task added!','ok');}
+      catch(e){toast('Add failed: '+e.message,'err',6000);}
     }
   },
 
@@ -1004,32 +1046,25 @@ window.App = {
     setTimeout(function(){ document.getElementById('confirmOk').focus(); }, 90);
   },
 
-  confirmDelete: function(){
+  confirmDelete: async function(){
     if(!pendingDeleteId) return;
-    tasks = tasks.filter(function(t){ return t.id!==pendingDeleteId; });
-    pendingDeleteId = null;
-    storageSave(tasks);
-    closeOverlay('confirmOverlay');
-    render();
-    toast('Task deleted.','inf');
+    var id=pendingDeleteId;
+    try{await cloudDelete(id);tasks=tasks.filter(function(t){return t.id!==id;});pendingDeleteId=null;closeOverlay('confirmOverlay');render();toast('Task deleted.','inf');}
+    catch(e){toast('Delete failed: '+e.message,'err',6000);}
   },
 
-  toggleDone: function(id){
+  toggleDone: async function(id){
     var t = tasks.find(function(x){ return x.id===id; });
     if(!t) return;
-    t.status = t.status==='completed' ? 'pending' : 'completed';
-    t.updatedAt = new Date().toISOString();
-    storageSave(tasks);
-    render();
+    var updated=Object.assign({},t,{status:t.status==='completed'?'pending':'completed',updatedAt:new Date().toISOString()});
+    try{await cloudUpdate(updated);Object.assign(t,updated);render();}catch(e){toast('Update failed: '+e.message,'err');}
   },
 
-  changeStatus: function(id, status){
+  changeStatus: async function(id, status){
     var t = tasks.find(function(x){ return x.id===id; });
     if(!t) return;
-    t.status = status;
-    t.updatedAt = new Date().toISOString();
-    storageSave(tasks);
-    render();
+    var updated=Object.assign({},t,{status:status,updatedAt:new Date().toISOString()});
+    try{await cloudUpdate(updated);Object.assign(t,updated);render();}catch(e){toast('Update failed: '+e.message,'err');}
   },
 
   setFilter: function(f){
@@ -1055,9 +1090,28 @@ window.App = {
 /* ── Wire up events ──────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function(){
 
-  // Load saved tasks
-  tasks = storageLoad();
-  render();
+  // Authentication and cloud data
+  document.getElementById('authForm').addEventListener('submit',async function(e){
+   e.preventDefault();var email=document.getElementById('authEmail').value.trim(),password=document.getElementById('authPassword').value;
+   var note=document.getElementById('authNote'),btn=document.getElementById('authSubmit');btn.disabled=true;note.textContent='';
+   try{
+    var r=authMode==='login'?await sb.auth.signInWithPassword({email:email,password:password}):await sb.auth.signUp({email:email,password:password});
+    if(r.error)throw r.error;
+    if(authMode==='signup'&&!r.data.session)note.textContent='Account created. Check your email to confirm, then sign in.';
+    else if(r.data.session)await syncSession(r.data.session);
+   }catch(err){note.textContent=err.message;}
+   finally{btn.disabled=false;btn.textContent=authMode==='login'?'Sign in':'Create account';}
+  });
+  document.getElementById('authToggle').addEventListener('click',function(){
+   authMode=authMode==='login'?'signup':'login';
+   document.getElementById('authTitle').textContent=authMode==='login'?'Welcome to TaskFlow':'Create your TaskFlow account';
+   document.getElementById('authDesc').textContent=authMode==='login'?'Sign in to access your tasks from any device.':'Create an account to keep your tasks in the cloud.';
+   document.getElementById('authSubmit').textContent=authMode==='login'?'Sign in':'Create account';
+   this.textContent=authMode==='login'?'Create an account':'Back to sign in';
+  });
+  document.getElementById('btnLogout').addEventListener('click',async function(){var r=await sb.auth.signOut();if(r.error)toast(r.error.message,'err');});
+  sb.auth.onAuthStateChange(function(event,session){if(event==='SIGNED_IN'||event==='SIGNED_OUT')Promise.resolve().then(function(){return syncSession(session);});});
+  sb.auth.getSession().then(function(r){if(r.error){document.getElementById('authNote').textContent=r.error.message;return;}syncSession(r.data.session);});
 
   // Header "Add Task"
   document.getElementById('btnAdd').addEventListener('click', function(){ App.openAdd(); });
